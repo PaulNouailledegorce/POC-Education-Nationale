@@ -1,0 +1,4 @@
+
+dans extraction excel to python -> suppression de null object
+ 
+Probleme de sauvegarde de mes analys dans le output tri structure 

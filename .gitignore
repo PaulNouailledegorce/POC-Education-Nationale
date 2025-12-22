@@ -1,0 +1,32 @@
+# Fichier contenant la clé API (ne pas commiter)
+api_key.txt
+
+# Fichiers Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Fichiers de sortie JSON/NDJSON
+output*.json
+output*.ndjson
+
+# Fichiers Excel temporaires
+~$*.xlsx
+~$*.xls
+
+# Environnements virtuels
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
