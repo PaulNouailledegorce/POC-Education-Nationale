@@ -1,10 +1,21 @@
 #!/usr/bin/env python
 """
-Traitement complet : on prend toutes les plaintes de output_tri.json,
-on les passe à Gemini 2.5 Flash Lite PAR BATCHS (plusieurs plaintes par requête),
-et on écrit une LISTE d'objets enrichis dans output_tri_structure.json.
+Traitement complet (enrichissement MINIMAL) :
+- On lit output_tri.json (liste d'objets "plaintes" bruts)
+- On appelle Gemini 2.5 Flash Lite par BATCH
+- On écrit une LISTE d'objets enrichis dans output_tri_structure2.json
 
-Gestion "propre" du JSON :
+CONTRAT DE SORTIE (par objet) :
+- On conserve TOUS les champs initiaux tels quels (y compris "Analyse")
+- On ajoute UNIQUEMENT :
+  - "label" (code taxonomie)
+  - "sous_label" (code taxonomie)
+  - "lieu" (lieu concret si identifiable, sinon null)
+  - "key_word" (liste de mots-clés, max ~5)
+
+Aucun autre champ ne doit apparaître dans la sortie.
+
+Gestion "propre" :
 - écriture atomique (fichier temporaire puis replace),
 - reprise possible sans casser le fichier,
 - reset possible sur demande.
@@ -12,176 +23,101 @@ Gestion "propre" du JSON :
 
 import json
 import time
+import subprocess
+import sys
 from pathlib import Path
-from typing import List, Optional, Literal, Tuple, Set
-from nature_probleme import NATURE_PROBLEME
-import json
+from typing import List, Optional, Tuple, Set
 
-
+from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
+from acronymes import ACRONYMES, ACRONYMES_BRUIT
+
+from nature_probleme import NATURE_PROBLEME
 
 # ---------- CONFIG ----------
-BATCH_SIZE = 5          # nombre de plaintes traitées par requête API
-MAX_RETRIES = 3         # nb de tentatives par batch en cas de 503
-RETRY_BASE_DELAY = 10   # secondes (backoff exponentiel)
+BATCH_SIZE = 10          # nombre de plaintes traitées par requête API
+MAX_RETRIES = 3          # nb de tentatives par batch en cas de 503
+RETRY_BASE_DELAY = 10    # secondes (backoff exponentiel)
 
 # ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
 BASE_DIR = Path(__file__).resolve().parent
 API_KEY_FILE = BASE_DIR / "api_key.txt"
 INPUT_JSON = BASE_DIR / "output_tri.json"
-OUTPUT_JSON = BASE_DIR / "output_tri_structure.json"
+OUTPUT_JSON = BASE_DIR / "output_tri_structure2.json"
 
-
-# ---------- SCHÉMA DE SORTIE (Pydantic) ----------
-class PlainteEnrichie(BaseModel):
-    # 📌 Contexte extrait automatiquement
+# ---------- SCHÉMA DE SORTIE (Pydantic) : MINIMAL ----------
+class EnrichissementMinimal(BaseModel):
+    label: str = Field(
+        description=(
+            "Code du label principal choisi parmi les clés de NATURE_PROBLEME "
+            "(ex: 'harcelement', 'examens', 'bourses_aides', 'autre')."
+        )
+    )
+    sous_label: str = Field(
+        description=(
+            "Code du sous_label choisi parmi les clés de NATURE_PROBLEME[label]['sous_labels'] "
+            "(ex: 'contestation_note', 'conflit_famille_etablissement', 'autre')."
+        )
+    )
     lieu: Optional[str] = Field(
-        description="Lieu principal concerné par la plainte (si identifiable)."
+        default=None,
+        description=(
+            "Lieu concret si identifiable et pertinent (ex: 'salle de classe', 'cantine', "
+            "'cour', 'internat', 'examen', 'en ligne'), sinon null."
+        )
     )
-    etablissement: Optional[str] = Field(
-        description="Nom ou type d'établissement (collège, lycée, etc.) si mentionné."
-    )
-    commune: Optional[str] = Field(
-        description="Commune / ville si identifiable."
-    )
-    academie: Optional[str] = Field(
-        description="Académie si identifiable à partir du contexte."
-    )
-    personnes_impliquees: List[str] = Field(
+    key_word: List[str] = Field(
         default_factory=list,
-        description="Liste des personnes ou rôles impliqués (ex: élève, parent, enseignant, chef d'établissement).",
-    )
-    acteurs_vises: List[str] = Field(
-        default_factory=list,
-        description="Liste des acteurs ou institutions principalement visés par la plainte.",
-    )
-
-    # 📌 Problématique
-    categorie_probleme: Optional[str]
-    type_probleme: Optional[str]
-    sous_probleme: Optional[str]
-    thematique: Optional[str]
-
-    # 📌 Gravité & Urgence
-    gravite: Optional[int] = Field(
-        description="Gravité de 1 (faible) à 3 (critique)."
-    )
-    urgence: Optional[int] = Field(
-        description="Urgence de 1 (faible) à 3 (critique)."
-    )
-    enjeux_sensibles: List[str] = Field(
-        default_factory=list,
-        description="Liste d'enjeux sensibles (ex: handicap, harcèlement, discrimination), vide si aucun.",
+        description=(
+            "Liste courte de mots-clés factuels (max 5) utiles à la statistique. "
+            "Ne pas dupliquer label/sous_label. Ex: ['conflit', 'COP', 'comportement']."
+        )
     )
 
-    # 📌 Sentiment & Ton
-    sentiment: Optional[Literal["positif", "neutre", "negatif", "tres_negatif"]] = None
-    emotion: Optional[str] = Field(
-        description="Emotion dominante (ex: colère, anxiété, injustice, détresse...)."
-    )
-    tonalite: Optional[str] = Field(
-        description="Tonalité du texte (ex: formel, agressif, urgent, résigné...)."
-    )
-
-    # 📌 Action recherchée
-    action_souhaitee: Optional[str] = Field(
-        description="Ce que la personne semble demander (information, intervention, révision de décision...)."
-    )
-    objectif_demandeur: Optional[str] = Field(
-        description="Objectif final implicite ou explicite du demandeur."
-    )
-    type_resolution_attendue: Optional[str] = Field(
-        description="Type de résolution attendue (médiation, réparation, explication, changement de décision...)."
-    )
-
-    # 📌 Données textuelles dérivées
-    analyse_brute: str = Field(
-        description="Texte original d'analyse / plainte fourni en entrée (copie du champ 'Analyse')."
-    )
-    resume_synthetique: Optional[str] = Field(
-        description="Résumé factuel et synthétique en quelques phrases de la situation."
-    )
-    mots_cles: List[str] = Field(
-        default_factory=list,
-        description="Liste de mots-clés synthétiques résumant la situation.",
-    )
-
-
-# ---------- UTILITAIRES GÉNÉRIQUES JSON ----------
-
+# ---------- UTILITAIRES JSON ----------
 def safe_write_json(path: Path, data) -> None:
-    """
-    Écrit le JSON de manière atomique :
-    - écriture dans un fichier temporaire
-    - remplacement du fichier cible une fois l'écriture terminée
-
-    Objectif : ne jamais laisser un fichier partiellement écrit ou corrompu.
-    """
+    """Écrit le JSON de manière atomique."""
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    # Écriture du JSON dans un fichier temporaire
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")  # fichier qui se termine proprement par un retour à la ligne
-    # Remplacement atomique
+        f.write("\n")
     tmp_path.replace(path)
 
-
 # ---------- UTILITAIRES EXISTANTS ----------
-
 def load_api_key() -> str:
     if not API_KEY_FILE.exists():
         raise FileNotFoundError(
             f"Le fichier {API_KEY_FILE} n'existe pas. "
             "Crée ce fichier et mets-y UNIQUEMENT la clé API."
         )
-
     api_key = API_KEY_FILE.read_text(encoding="utf-8").strip()
     if not api_key:
         raise ValueError("La clé API est vide dans le fichier.")
     return api_key
 
-
 def load_all_plaintes() -> List[dict]:
     """Charge toutes les plaintes depuis le JSON d'entrée."""
     if not INPUT_JSON.exists():
         raise FileNotFoundError(f"Fichier d'entrée introuvable : {INPUT_JSON}")
-
     with INPUT_JSON.open("r", encoding="utf-8") as f:
         data = json.load(f)
-
     if not isinstance(data, list) or len(data) == 0:
         raise ValueError("Le fichier JSON doit contenir une liste non vide d'objets.")
-
     return data
 
-
 def load_existing_results() -> Tuple[List[dict], Set]:
-    """
-    Charge le fichier de sortie s'il existe déjà, de manière robuste.
-
-    Retourne :
-      - la liste d'objets enrichis déjà présents
-      - l'ensemble des IDs déjà traités
-
-    Gestion "propre" :
-    - si le fichier n'existe pas ou est vide -> [], set()
-    - si le JSON est invalide -> on propose de créer un backup et de repartir de zéro
-    - si le contenu n'est pas une liste -> avertissement + option de repartir de zéro
-    """
+    """Charge le fichier de sortie s'il existe déjà, de manière robuste."""
     if not OUTPUT_JSON.exists() or OUTPUT_JSON.stat().st_size == 0:
         return [], set()
 
     try:
         raw = OUTPUT_JSON.read_text(encoding="utf-8").strip()
         if not raw:
-            # Fichier rempli uniquement d'espaces / retours à la ligne
-            print("[INFO] Fichier de sortie vide (espaces/retours à la ligne). Initialisation avec une liste vide.")
+            print("[INFO] Fichier de sortie vide (espaces/retours). Initialisation avec une liste vide.")
             return [], set()
 
         data = json.loads(raw)
-
         if not isinstance(data, list):
             print("[AVERTISSEMENT] Le fichier de sortie existe mais ne contient pas une liste JSON.")
             while True:
@@ -230,85 +166,94 @@ def load_existing_results() -> Tuple[List[dict], Set]:
             pass
     return data, done_ids
 
-
+# ---------- PROMPT MINIMAL (verrouillé) ----------
 def build_batch_prompt(batch: List[dict]) -> str:
     """
-    Construit le prompt pour UN BATCH de plaintes.
-    On donne la liste en JSON, + la taxonomie NATURE_PROBLEME,
-    et on demande un tableau JSON d'objets d'enrichissement dans le même ordre.
+    Construit le prompt pour UN BATCH :
+    - On fournit la taxonomie
+    - On fournit les plaintes
+    - On exige une sortie STRICTEMENT MINIMALE (label/sous_label/lieu/key_word) uniquement.
     """
     plaintes_json = json.dumps(batch, ensure_ascii=False, indent=2)
     taxonomie_json = json.dumps(NATURE_PROBLEME, ensure_ascii=False, indent=2)
+    acronymes_json = json.dumps(ACRONYMES, ensure_ascii=False, indent=2)
+    bruits_json = json.dumps(sorted(list(ACRONYMES_BRUIT)), ensure_ascii=False, indent=2)
 
-    prompt = f"""
-Tu es un expert de médiation scolaire et d'analyse de saisines.
+    return f"""
+Tu es un expert de médiation scolaire. Tu dois classifier des saisines pour produire des statistiques fiables.
 
-On te fournit :
-1) Une LISTE de plaintes sous forme JSON, avec des champs bruts issus d'un système
-   (identifiant, dates, pôle, catégorie, analyse textuelle, etc.).
-2) Une TAXONOMIE de la nature des problèmes, appelée NATURE_PROBLEME, structurée ainsi :
-   - chaque entrée a une clé "label" (catégorie principale, ex. "harcelement", "examens", "bourses_aides", etc.)
-   - chaque "label" contient un dictionnaire "sous_labels" avec des clés (codes) de sous-problèmes
-     (ex. "harcelement_islamophobe", "contestation_note", "refus_bourse", etc.).
+IMPORTANT : SORTIE STRICTE
+- Tu dois répondre UNIQUEMENT par un TABLEAU JSON.
+- Chaque élément du tableau doit contenir EXACTEMENT ces 4 champs et rien d'autre :
+  1) "label"
+  2) "sous_label"
+  3) "lieu"
+  4) "key_word"
+- Interdiction de renvoyer d'autres champs (pas de résumé, pas d'analyse, pas d'émotion, pas de gravité, etc.).
+- Interdiction de recopier le texte de la plainte.
 
-TAXONOMIE NATURE_PROBLEME (codes autorisés) :
+TAXONOMIE (codes autorisés)
+- "label" doit être une des clés principales de NATURE_PROBLEME
+- "sous_label" doit être une des clés de NATURE_PROBLEME[label]["sous_labels"]
+- Tu ne dois JAMAIS inventer de nouveaux codes.
+- Fallback :
+  - si aucun label ne convient : label="autre"
+  - si aucun sous_label ne convient dans ce label : sous_label="autre"
+
+NATURE_PROBLEME :
 {taxonomie_json}
 
-RÔLE ATTENDU
------------- 
-Pour CHAQUE plainte, tu dois :
-- analyser le contenu de manière objective et factuelle ;
-- remplir un objet d'enrichissement conforme au schéma (response_schema) avec, en particulier :
-  - categorie_probleme : le CODE du label choisi dans NATURE_PROBLEME
-    (ex. "harcelement", "examens", "bourses_aides", "autre"...)
-  - sous_probleme : le CODE du sous_label choisi dans NATURE_PROBLEME[categorie_probleme]["sous_labels"]
-    (ex. "harcelement_islamophobe", "contestation_note", "refus_bourse", "autre"...)
+RÈGLES SUR "lieu"
+- "lieu" = lieu concret si identifiable (ex: salle de classe, cantine, cour, internat, examen, en ligne/plateforme)
+- Si non identifiable : null
+- Ne pas confondre avec le pôle / académie (Lille, etc.)
 
-CONTRAINTES SUR LA TAXONOMIE
-----------------------------
-- Tu DOIS toujours choisir EXACTEMENT :
-  - 1 valeur de "label" parmi les clés de NATURE_PROBLEME,
-  - 1 valeur de "sous_label" parmi les clés de "sous_labels" du label choisi.
-- Tu NE DOIS PAS inventer de nouveaux codes.
-- Si aucun label ne semble parfaitement adapté, tu prends "autre" comme categorie_probleme.
-- Si aucun sous_label spécifique ne convient à l'intérieur d'un label, tu prends "autre" dans ses sous_labels.
-- Tu écris dans les champs :
-  - categorie_probleme : le code du label (par ex. "harcelement", "examens", "bourses_aides", "autre")
-  - sous_probleme : le code du sous_label (par ex. "harcelement_islamophobe", "refus_bourse", "autre")
+RÈGLES SUR "key_word"
+- "key_word" = liste de 2 à 5 mots-clés factuels utiles
+- Ne pas dupliquer "label" / "sous_label"
+- Mots courts, sans phrases, pas de ponctuation superflue
 
-AUTRES CHAMPS DU SCHÉMA
------------------------
-En plus de ces deux champs, tu renseignes normalement les autres champs de l'objet d'enrichissement :
-- gravite : entier de 1 (faible) à 3 (critique).
-- urgence : entier de 1 (faible) à 3 (critique).
-- enjeux_sensibles : liste de codes (ex. ["handicap", "harcelement", "discrimination"]) si applicable.
-- personnes_impliquees, acteurs_vises, action_souhaitee, type_resolution_attendue, etc.
-- analyse_brute : doit reprendre INTÉGRALEMENT le texte du champ "Analyse" de la plainte correspondante.
-- resume_synthetique : résumé concis, factuel, sans jugement de valeur.
-- mots_cles : liste de quelques termes courts (1 à 3 mots chacun).
 
-RAPPEL IMPORTANT
-----------------
-- Tu n'as PAS à renvoyer les champs bruts (dates, id, pôle, etc.) : le système les recopie lui-même.
-- Si une information n'est pas clairement déductible, mets null, une valeur neutre adaptée ou une liste vide.
-- Tu dois répondre par un TABLEAU JSON d'objets d'enrichissement, dans le même ordre que la liste d'entrée :
-  - 1er élément de la liste d'entrée -> 1er objet d'enrichissement
-  - 2e élément -> 2e objet, etc.
+AIDE À L’INTERPRÉTATION — ACRONYMES (FIABILITÉ NON GARANTIE)
+----------------------------------------------------------
+Les données contiennent des acronymes. Ils servent d’indices de contexte, MAIS ils ne sont pas fiables à 100%.
 
-Voici la LISTE DES PLAINTES À ANALYSER (JSON) :
+RÈGLES :
+1) Si un acronyme est présent ET cohérent avec le texte "Analyse", tu peux l'utiliser comme signal.
+2) Si un acronyme n’a pas de définition, OU figure dans la liste "BRUIT", OU semble hors-sujet
+   (ex: initiales médiateur / faute de frappe), alors IGNORE-LE.
+3) Ne fais JAMAIS une classification uniquement parce qu’un acronyme est présent :
+   la preuve principale doit venir du contenu de "Analyse" et des champs métier.
+4) Tu ne dois PAS recopier les définitions dans la sortie. C’est uniquement pour comprendre.
 
+ACRONYMES DÉFINIS :
+{acronymes_json}
+
+CODES BRUIT / FAUTES PROBABLES / INITIALES DU MEDIATEURS :
+{bruit_json}
+
+PRIORITÉ DES SOURCES POUR CLASSIFIER :
+1) Texte "Analyse" (priorité maximale)
+2) Champs métier structurés (Catégorie / Domaine / Sous-domaine / Nature de la saisine)
+3) Acronymes (uniquement comme indices secondaires)
+
+
+ENTRÉE : LISTE DES PLAINTES (JSON)
+Tu dois produire 1 objet de sortie par plainte, dans le même ordre exact.
+
+PLAINTES :
 {plaintes_json}
 
-NE RENVOIE AUCUNE EXPLICATION EN TEXTE LIBRE.
-Renvoie UNIQUEMENT un TABLEAU JSON d'objets d'enrichissement, dans le même ordre que la liste d'entrée.
-"""
-    return prompt
+RÉPONSE : UNIQUEMENT un tableau JSON (même ordre), sans texte libre.
+""".strip()
 
-
+# ---------- APPEL GEMINI ----------
 def enrich_batch(client: genai.Client, batch: List[dict]) -> List[dict]:
     """
-    Appelle Gemini pour un batch de plaintes, avec gestion des retries en cas de 503.
-    Retourne la liste des objets finaux (plainte d'origine + enrichissement).
+    Appelle Gemini pour un batch.
+    Retourne une liste d'objets finaux :
+    - champs initiaux inchangés
+    - + 4 champs enrichis minimaux
     """
     prompt = build_batch_prompt(batch)
 
@@ -319,21 +264,26 @@ def enrich_batch(client: genai.Client, batch: List[dict]) -> List[dict]:
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
-                    response_schema=list[PlainteEnrichie],  # liste d'objets d'enrichissement
+                    response_schema=list[EnrichissementMinimal],
                 ),
             )
-            parsed_list: List[PlainteEnrichie] = response.parsed
 
+            parsed_list: List[EnrichissementMinimal] = response.parsed
             if len(parsed_list) != len(batch):
                 raise ValueError(
                     f"Nombre d'objets retournés ({len(parsed_list)}) "
                     f"différent du nombre de plaintes en entrée ({len(batch)})."
                 )
 
-            final_batch = []
+            final_batch: List[dict] = []
             for plainte_brute, enrichie in zip(batch, parsed_list):
                 enriched_dict = enrichie.model_dump()
+
+                # Merge minimal : on garde l'objet initial tel quel + 4 champs
                 final_obj = {**plainte_brute, **enriched_dict}
+
+                # Sécurité : on s'assure qu'on n'a pas accidentellement injecté des champs interdits
+                # (ici, enrichie ne peut contenir que les 4 clés, grâce au schema)
                 final_batch.append(final_obj)
 
             return final_batch
@@ -349,36 +299,52 @@ def enrich_batch(client: genai.Client, batch: List[dict]) -> List[dict]:
                     )
                     time.sleep(delay)
                     continue
-                else:
-                    print("[ERREUR] 503 UNAVAILABLE après plusieurs tentatives. Arrêt du traitement.")
-                    # On remonte l'erreur jusqu'au main, qui ne touchera pas au fichier de sortie
-                    raise
-            else:
-                print(f"[ERREUR] Échec enrichissement batch : {e}")
+                print("[ERREUR] 503 UNAVAILABLE après plusieurs tentatives. Arrêt du traitement.")
                 raise
+            print(f"[ERREUR] Échec enrichissement batch : {e}")
+            raise
 
+# ---------- VÉRIFICATION AVANCEMENT (optionnel) ----------
+def check_avancement():
+    """Lance le vérificateur d'avancement dans un sous-processus."""
+    checker_path = BASE_DIR / "avancement_checker.py"
+    if checker_path.exists():
+        print("\n[INFO] Lancement du vérificateur d'avancement...")
+        try:
+            subprocess.run([sys.executable, str(checker_path)], check=False)
+        except Exception as e:
+            print(f"[AVERTISSEMENT] Impossible de lancer le vérificateur : {e}")
+    else:
+        print(f"[AVERTISSEMENT] Fichier {checker_path} introuvable.")
 
 # ---------- LOGIQUE PRINCIPALE ----------
-
 def main():
     try:
+        print("\n" + "=" * 60)
+        print("🚀 ENRICHISSEMENT MINIMAL DES PLAINTES (GEMINI)")
+        print("=" * 60)
+
+        check_choice = input(
+            "\nSouhaites-tu vérifier l'avancement actuel avant de commencer ? [O]ui / [N]on : "
+        ).strip().lower()
+        if check_choice in ("o", "oui"):
+            check_avancement()
+            input("\nAppuie sur Entrée pour continuer avec le traitement...")
+
         api_key = load_api_key()
         client = genai.Client(api_key=api_key)
 
         plaintes = load_all_plaintes()
-        total = len(plaintes)
-        print(f"[INFO] Nombre total de plaintes dans le fichier d'entrée : {total}")
+        print(f"\n[INFO] Nombre total de plaintes dans le fichier d'entrée : {len(plaintes)}")
         print(f"[INFO] Fichier de sortie : {OUTPUT_JSON.resolve()}")
 
-        # Charger résultats existants (gestion robuste)
         existing_results, done_ids = load_existing_results()
 
         if existing_results:
             choice = input(
                 "Un fichier de sortie existe déjà.\n"
                 f"- {len(existing_results)} plaintes déjà enrichies.\n"
-                "Que veux-tu faire ? [R]eprendre là où ça s'est arrêté / "
-                "[E]craser et recommencer depuis le début : "
+                "Que veux-tu faire ? [R]eprendre là où ça s'est arrêté / [E]craser et recommencer : "
             ).strip().lower()
 
             if choice == "e":
@@ -391,30 +357,24 @@ def main():
 
         results: List[dict] = list(existing_results)
 
-        # Filtrer les plaintes non encore traitées
         pending = [p for p in plaintes if p.get("id") not in done_ids]
         print(f"[INFO] Plaintes restantes à traiter : {len(pending)}")
 
         for start in range(0, len(pending), BATCH_SIZE):
-            batch = pending[start: start + BATCH_SIZE]
+            batch = pending[start : start + BATCH_SIZE]
             ids_batch = [p.get("id") for p in batch]
             print(f"\n[INFO] Traitement batch {start} -> {start + len(batch) - 1} (ids={ids_batch})")
 
             final_batch = enrich_batch(client, batch)
 
-            # Mise à jour des résultats + set d'IDs
             results.extend(final_batch)
             for obj in final_batch:
                 pid = obj.get("id")
                 if pid is not None:
                     done_ids.add(pid)
 
-            # Sauvegarde immédiate, en mode "propre" (atomique)
             safe_write_json(OUTPUT_JSON, results)
-            print(
-                f"[OK] Batch de {len(final_batch)} plaintes enrichies et sauvegardées "
-                f"(total={len(results)})."
-            )
+            print(f"[OK] Batch de {len(final_batch)} plaintes enrichies et sauvegardées (total={len(results)}).")
 
         print(f"\n[OK] Traitement terminé. {len(results)} plaintes enrichies au total.")
         print(f"[OK] Résultat final dans : {OUTPUT_JSON.resolve()}")
@@ -422,7 +382,6 @@ def main():
     except Exception as e:
         print(f"[ERREUR] Une erreur s'est produite : {e}")
         print("[INFO] Tout ce qui a été enrichi avant l'erreur est déjà sauvegardé (écriture atomique).")
-
 
 if __name__ == "__main__":
     main()

@@ -3,10 +3,12 @@ import json
 from pathlib import Path
 import pandas as pd
 
-INPUT_PATH = Path("Excel et data\concatenation.xlsx")
+# ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
+BASE_DIR = Path(__file__).resolve().parent
+INPUT_PATH = BASE_DIR / "Excel et data" / "concatenation.xlsx"
 
 # 🔥 Nom du fichier de sortie JSON
-OUTPUT_JSON = Path("output_tri.json")
+OUTPUT_JSON = BASE_DIR / "output_tri.json"
 
 
 def load_table(input_path: Path) -> pd.DataFrame:
@@ -33,21 +35,22 @@ def load_table(input_path: Path) -> pd.DataFrame:
 def preprocess_df(df: pd.DataFrame) -> pd.DataFrame:
     """
     Pré-nettoyage :
-    - 'Numéro' -> 'id' (entier)
-    - on garde seulement les colonnes utiles
+    - Convertit la colonne 'id' en Int64
+    - Remplace les tags géographiques par les noms de villes complets
+    - Garde seulement les colonnes utiles
     """
 
-    # 1) Créer la colonne 'id' à partir de 'Numéro'
-    if "Numéro" in df.columns:
-        # Convertir en entier (en gérant les NaN)
-        df["id"] = df["Numéro"].astype("Int64")
-    else:
-        # Si jamais la colonne n'existe pas, on lève une erreur claire
-        raise KeyError("La colonne 'Numéro' est introuvable dans le fichier.")
+    # 1) Vérifier et convertir la colonne 'id' en Int64
+    if "id" not in df.columns:
+        raise KeyError("La colonne 'id' est introuvable dans le fichier.")
+    
+    # Convertir 'id' en Int64 (gère les valeurs non numériques en les convertissant en NaN)
+    df["id"] = pd.to_numeric(df["id"], errors='coerce').astype("Int64")
+    print("[INFO] Colonne 'id' convertie en Int64")
 
     # 2) Définir les colonnes à garder
     keep_cols = [
-        "Numéro",
+        "id",
         "Date arrivée",
         "Date clôture fiche",
         "Pôle en charge",
@@ -130,6 +133,14 @@ def dataframe_to_json(df: pd.DataFrame):
     """
     Convertit chaque ligne du DataFrame en objet JSON.
     """
+    # Créer une copie pour éviter de modifier le DataFrame original
+    df = df.copy()
+    
+    # Convertir les colonnes de type datetime en chaînes de caractères
+    for col in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].dt.strftime('%Y-%m-%d').where(pd.notnull(df[col]), None)
+    
     # Convertit NaN / <NA> → None pour un JSON propre
     df = df.where(pd.notnull(df), None)
 
