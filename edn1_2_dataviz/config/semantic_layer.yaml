@@ -1,0 +1,79 @@
+meta:
+  title: "EDN1.2 - Dataviz"
+  description: "Couche sémantique pour la navigation Streamlit"
+
+dimensions:
+  date_arrivee:
+    label: "Date d'arrivée"
+    type: date
+  date_cloture:
+    label: "Date de clôture"
+    type: date
+  pole_en_charge:
+    label: "Pôle en charge"
+    type: string
+  categorie:
+    label: "Catégorie"
+    type: string
+  sous_categorie:
+    label: "Sous-catégorie"
+    type: string
+  domaine:
+    label: "Domaine"
+    type: string
+  sous_domaine:
+    label: "Sous-domaine"
+    type: string
+  aspect_contextuel:
+    label: "Aspect contextuel"
+    type: string
+  nature_saisine:
+    label: "Nature de la saisine"
+    type: string
+  label:
+    label: "Label"
+    type: string
+  sous_label:
+    label: "Sous-label"
+    type: string
+  lieu:
+    label: "Lieu"
+    type: string
+  label_proposition:
+    label: "Label proposition"
+    type: string
+  sous_label_proposition:
+    label: "Sous-label proposition"
+    type: string
+
+text_fields:
+  - analyse
+  - key_word_str
+
+display:
+  date_format: "%Y-%m-%d"
+  max_rows: 2000
+  default_top_n: 20
+
+presets:
+  - name: "Saisines par pôle"
+    description: "Volume de saisines par pôle en charge."
+    group_by: pole_en_charge
+    metric: count
+  - name: "RH personnels par pôle"
+    description: "Filtre label rh_personnels, groupé par pôle."
+    filters:
+      label: ["rh_personnels"]
+    group_by: pole_en_charge
+    metric: count
+  - name: "Sous-label par domaine"
+    description: "Répartition des sous-labels par domaine."
+    group_by: domaine
+    split_by: sous_label
+    metric: count
+  - name: "Évolution mensuelle"
+    description: "Chronologie des saisines (date d'arrivée)."
+    group_by: date_arrivee
+    metric: count
+    time_grain: month
+

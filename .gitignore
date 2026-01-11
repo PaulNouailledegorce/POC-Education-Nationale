@@ -30,3 +30,7 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Bases de données DuckDB
+*.duckdb
+*.duckdb.wal
