@@ -4,11 +4,11 @@ from pathlib import Path
 import pandas as pd
 
 # ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
-BASE_DIR = Path(__file__).resolve().parent
-INPUT_PATH = BASE_DIR / "Excel et data" / "concatenation.xlsx"
+BASE_DIR = Path(__file__).resolve().parent.parent
+INPUT_PATH = BASE_DIR / "data" / "input" / "Excel et data" / "concatenation.xlsx"
 
 # 🔥 Nom du fichier de sortie JSON
-OUTPUT_JSON = BASE_DIR / "output_tri.json"
+OUTPUT_JSON = BASE_DIR / "data" / "output" / "output_tri.json"
 
 
 def load_table(input_path: Path) -> pd.DataFrame:

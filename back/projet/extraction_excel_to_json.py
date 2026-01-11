@@ -4,10 +4,12 @@ from pathlib import Path
 import pandas as pd
 
 
-INPUT_PATH = Path("MEDIA2_Extraction_janv2022_ECE_12102025 ananymisé.csv")
+# ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
+BASE_DIR = Path(__file__).resolve().parent.parent
+INPUT_PATH = BASE_DIR / "data" / "input" / "Excel et data" / "MEDIA2_Extraction_janv2022_ECE_12102025 ananymisé.xlsx"
 
 # 🔥 Nom du fichier de sortie JSON
-OUTPUT_JSON = Path("output.json")
+OUTPUT_JSON = BASE_DIR / "data" / "output" / "output.json"
 
 
 def load_table(input_path: Path) -> pd.DataFrame:

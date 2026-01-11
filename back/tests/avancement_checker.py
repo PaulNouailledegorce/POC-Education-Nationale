@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import List, Set, Dict, Optional
 
 # ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
-BASE_DIR = Path(__file__).resolve().parent
-INPUT_JSON = BASE_DIR / "output_tri.json"
-OUTPUT_JSON = BASE_DIR / "output_tri_structure2.json"
+BASE_DIR = Path(__file__).resolve().parent.parent
+INPUT_JSON = BASE_DIR / "data" / "output" / "output_tri.json"
+OUTPUT_JSON = BASE_DIR / "data" / "output" / "output_tri_structure2.json"
 
 
 def load_json_list(path: Path) -> List[dict]:

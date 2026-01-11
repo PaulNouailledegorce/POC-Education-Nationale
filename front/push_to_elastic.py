@@ -16,7 +16,9 @@ import requests
 ES_URL = "http://localhost:9200"
 INDEX_NAME = "plaintes_mediation_v1"
 
-NDJSON_FILE = Path("output_tri_structure.ndjson")
+# ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
+BASE_DIR = Path(__file__).resolve().parent.parent
+NDJSON_FILE = BASE_DIR / "back" / "data" / "output" / "output_tri_structure.ndjson"
 
 BATCH_SIZE = 500  # nombre de documents envoyés par requête _bulk
 

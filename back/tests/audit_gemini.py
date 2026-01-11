@@ -43,5 +43,7 @@ Retourne UNIQUEMENT un JSON valide correspondant au schéma:
             print(f"[{i+1}/{n}] latency={dt:.2f}s ERROR={e}")
 
 if __name__ == "__main__":
-    api_key = open("api_key.txt", "r", encoding="utf-8").read().strip()
+    from pathlib import Path
+    api_key_path = Path(__file__).resolve().parent.parent / "projet" / "api_key.txt"
+    api_key = open(api_key_path, "r", encoding="utf-8").read().strip()
     run_audit(api_key, n=10)

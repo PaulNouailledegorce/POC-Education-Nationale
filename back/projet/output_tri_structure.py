@@ -43,10 +43,10 @@ MAX_RETRIES = 3          # nb de tentatives par batch en cas de 503
 RETRY_BASE_DELAY = 10    # secondes (backoff exponentiel)
 
 # ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
-BASE_DIR = Path(__file__).resolve().parent
-API_KEY_FILE = BASE_DIR / "api_key.txt"
-INPUT_JSON = BASE_DIR / "output_tri.json"
-OUTPUT_JSON = BASE_DIR / "output_tri_structure2.json"
+BASE_DIR = Path(__file__).resolve().parent.parent
+API_KEY_FILE = BASE_DIR / "projet" / "api_key.txt"
+INPUT_JSON = BASE_DIR / "data" / "output" / "output_tri.json"
+OUTPUT_JSON = BASE_DIR / "data" / "output" / "output_tri_structure2.json"
 
 # ---------- SCHÉMA DE SORTIE (Pydantic) : MINIMAL ----------
 class EnrichissementMinimal(BaseModel):

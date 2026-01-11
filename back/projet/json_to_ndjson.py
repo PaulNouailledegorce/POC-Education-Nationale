@@ -7,8 +7,10 @@ en un fichier NDJSON (1 document JSON par ligne).
 import json
 from pathlib import Path
 
-INPUT = Path("output_tri_structure.json")
-OUTPUT = Path("output_tri_structure.ndjson")
+# ---------- CHEMINS BASÉS SUR LE SCRIPT ----------
+BASE_DIR = Path(__file__).resolve().parent.parent
+INPUT = BASE_DIR / "data" / "output" / "output_tri_structure.json"
+OUTPUT = BASE_DIR / "data" / "output" / "output_tri_structure.ndjson"
 
 def main():
     if not INPUT.exists():
