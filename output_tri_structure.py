@@ -33,6 +33,8 @@ from google import genai
 from google.genai import types
 from acronymes import ACRONYMES, ACRONYMES_BRUIT
 
+
+
 from nature_probleme import NATURE_PROBLEME
 
 # ---------- CONFIG ----------
@@ -48,30 +50,54 @@ OUTPUT_JSON = BASE_DIR / "output_tri_structure2.json"
 
 # ---------- SCHÉMA DE SORTIE (Pydantic) : MINIMAL ----------
 class EnrichissementMinimal(BaseModel):
+    # 🔹 Classification principale (OBLIGATOIRE)
     label: str = Field(
         description=(
             "Code du label principal choisi parmi les clés de NATURE_PROBLEME "
-            "(ex: 'harcelement', 'examens', 'bourses_aides', 'autre')."
+            "(ex: 'harcelement', 'examens_evaluations', 'bourses_aides', 'autre')."
         )
     )
     sous_label: str = Field(
         description=(
-            "Code du sous_label choisi parmi les clés de NATURE_PROBLEME[label]['sous_labels'] "
-            "(ex: 'contestation_note', 'conflit_famille_etablissement', 'autre')."
+            "Code du sous_label choisi parmi les clés de "
+            "NATURE_PROBLEME[label]['sous_labels'] "
+            "(ex: 'harcelement_islamophobe', 'contestation_note', 'autre')."
         )
     )
+
+    # 🔹 Contexte léger
     lieu: Optional[str] = Field(
         default=None,
         description=(
-            "Lieu concret si identifiable et pertinent (ex: 'salle de classe', 'cantine', "
-            "'cour', 'internat', 'examen', 'en ligne'), sinon null."
+            "Lieu concret si identifiable et pertinent "
+            "(ex: 'salle de classe', 'cantine', 'cour', 'internat', "
+            "'examen', 'en ligne'), sinon null."
         )
     )
     key_word: List[str] = Field(
         default_factory=list,
         description=(
-            "Liste courte de mots-clés factuels (max 5) utiles à la statistique. "
-            "Ne pas dupliquer label/sous_label. Ex: ['conflit', 'COP', 'comportement']."
+            "Liste courte de mots-clés factuels (2 à 5 maximum), utiles à la statistique. "
+            "Ne pas dupliquer label ou sous_label. "
+            "Ex: ['conflit', 'COP', 'comportement']."
+        )
+    )
+
+    # 🔹 Propositions (OPTIONNELLES – uniquement en cas d'incertitude)
+    label_proposition: Optional[str] = Field(
+        default=None,
+        description=(
+            "Label alternatif proposé UNIQUEMENT si la classification principale "
+            "est incertaine ou trop restrictive. "
+            "Doit être plus générique et appartenir aux clés de NATURE_PROBLEME."
+        )
+    )
+    sous_label_proposition: Optional[str] = Field(
+        default=None,
+        description=(
+            "Sous-label alternatif proposé UNIQUEMENT si nécessaire. "
+            "Doit être plus générique ou transverse que le sous_label principal "
+            "et appartenir à NATURE_PROBLEME[label_proposition]['sous_labels']."
         )
     )
 
@@ -177,75 +203,162 @@ def build_batch_prompt(batch: List[dict]) -> str:
     plaintes_json = json.dumps(batch, ensure_ascii=False, indent=2)
     taxonomie_json = json.dumps(NATURE_PROBLEME, ensure_ascii=False, indent=2)
     acronymes_json = json.dumps(ACRONYMES, ensure_ascii=False, indent=2)
-    bruits_json = json.dumps(sorted(list(ACRONYMES_BRUIT)), ensure_ascii=False, indent=2)
+    bruit_json = json.dumps(sorted(list(ACRONYMES_BRUIT)), ensure_ascii=False, indent=2)
 
     return f"""
-Tu es un expert de médiation scolaire. Tu dois classifier des saisines pour produire des statistiques fiables.
+Tu es un expert de médiation scolaire. Tu dois classifier des saisines afin de produire
+des statistiques fiables, stables et exploitables.
 
-IMPORTANT : SORTIE STRICTE
-- Tu dois répondre UNIQUEMENT par un TABLEAU JSON.
-- Chaque élément du tableau doit contenir EXACTEMENT ces 4 champs et rien d'autre :
+================================================
+IMPORTANT — CONTRAT DE SORTIE STRICT
+================================================
+
+Tu dois répondre UNIQUEMENT par un TABLEAU JSON.
+
+Chaque élément du tableau doit contenir :
+- OBLIGATOIREMENT :
   1) "label"
   2) "sous_label"
   3) "lieu"
   4) "key_word"
-- Interdiction de renvoyer d'autres champs (pas de résumé, pas d'analyse, pas d'émotion, pas de gravité, etc.).
-- Interdiction de recopier le texte de la plainte.
 
-TAXONOMIE (codes autorisés)
+- OPTIONNELLEMENT (UNIQUEMENT dans certains cas) :
+  5) "label_proposition"
+  6) "sous_label_proposition"
+
+⚠️ INTERDICTIONS ABSOLUES :
+- Ne renvoie AUCUN autre champ.
+- Ne renvoie PAS de résumé, analyse, émotion, gravité, urgence, etc.
+- Ne recopie JAMAIS le texte de la plainte.
+- Ne commente PAS ta réponse.
+
+================================================
+TAXONOMIE — CODES AUTORISÉS
+================================================
+
+La classification DOIT s’appuyer sur la taxonomie suivante.
+
 - "label" doit être une des clés principales de NATURE_PROBLEME
 - "sous_label" doit être une des clés de NATURE_PROBLEME[label]["sous_labels"]
-- Tu ne dois JAMAIS inventer de nouveaux codes.
-- Fallback :
-  - si aucun label ne convient : label="autre"
-  - si aucun sous_label ne convient dans ce label : sous_label="autre"
+- Tu ne dois JAMAIS inventer de nouveaux codes pour la classification principale.
 
 NATURE_PROBLEME :
 {taxonomie_json}
 
+================================================
+RÈGLE FONDAMENTALE DE CLASSIFICATION
+================================================
+
+Tu dois TOUJOURS fournir une classification principale ("label", "sous_label").
+Cette classification est celle utilisée pour les statistiques.
+
+------------------------------------------------
+1) UTILISATION DE "autre"
+------------------------------------------------
+Utilise "label = autre" UNIQUEMENT si :
+- aucun label existant de la taxonomie ne correspond au problème,
+- le sujet est clairement hors du champ couvert par NATURE_PROBLEME.
+
+Si tu utilises "label = autre" :
+- tu DOIS proposer un "label_proposition",
+- et un "sous_label_proposition" si possible.
+
+------------------------------------------------
+2) UTILISATION DES PROPOSITIONS
+------------------------------------------------
+Les champs "label_proposition" et "sous_label_proposition" servent
+EXCLUSIVEMENT à suggérer une ÉVOLUTION de la taxonomie.
+
+Tu peux les utiliser si :
+- le cas est ambigu entre plusieurs sous_labels existants,
+- le sous_label existant est trop spécifique,
+- le problème est transversal ou récurrent,
+- plusieurs sous_labels proches pourraient s’appliquer.
+
+RÈGLES POUR LES PROPOSITIONS :
+- Elles doivent être PLUS GÉNÉRIQUES que la classification principale.
+- Elles doivent pouvoir regrouper PLUSIEURS cas similaires.
+- Elles doivent appartenir à la taxonomie existante
+  OU être formulées de manière suffisamment générales pour y être intégrées.
+
+------------------------------------------------
+3) CAS CLAIR
+------------------------------------------------
+Si la classification principale est claire et suffisante :
+- N’utilise PAS "label_proposition"
+- N’utilise PAS "sous_label_proposition"
+
+IMPORTANT :
+- "autre" n’est PAS une proposition.
+- Les propositions ne remplacent JAMAIS la classification principale.
+
+================================================
 RÈGLES SUR "lieu"
-- "lieu" = lieu concret si identifiable (ex: salle de classe, cantine, cour, internat, examen, en ligne/plateforme)
-- Si non identifiable : null
-- Ne pas confondre avec le pôle / académie (Lille, etc.)
+================================================
 
+- "lieu" = lieu CONCRET si identifiable
+  (ex: "salle de classe", "cantine", "cour", "internat",
+       "examen", "plateforme en ligne").
+- Si non identifiable ou non pertinent : null.
+- Ne pas confondre avec pôle, académie ou rectorat (ex: Lille).
+
+================================================
 RÈGLES SUR "key_word"
-- "key_word" = liste de 2 à 5 mots-clés factuels utiles
-- Ne pas dupliquer "label" / "sous_label"
-- Mots courts, sans phrases, pas de ponctuation superflue
+================================================
 
+- "key_word" = liste de 2 à 5 mots-clés factuels.
+- Ne pas dupliquer "label" ou "sous_label".
+- Mots courts, sans phrases, sans ponctuation superflue.
+- Objectif : aide à la statistique et au filtrage.
 
-AIDE À L’INTERPRÉTATION — ACRONYMES (FIABILITÉ NON GARANTIE)
-----------------------------------------------------------
-Les données contiennent des acronymes. Ils servent d’indices de contexte, MAIS ils ne sont pas fiables à 100%.
+================================================
+AIDE À L’INTERPRÉTATION — ACRONYMES
+================================================
+
+Les données peuvent contenir des acronymes.
+Ils servent d’INDICES DE CONTEXTE, mais ne sont PAS fiables à 100%.
 
 RÈGLES :
-1) Si un acronyme est présent ET cohérent avec le texte "Analyse", tu peux l'utiliser comme signal.
-2) Si un acronyme n’a pas de définition, OU figure dans la liste "BRUIT", OU semble hors-sujet
-   (ex: initiales médiateur / faute de frappe), alors IGNORE-LE.
-3) Ne fais JAMAIS une classification uniquement parce qu’un acronyme est présent :
-   la preuve principale doit venir du contenu de "Analyse" et des champs métier.
-4) Tu ne dois PAS recopier les définitions dans la sortie. C’est uniquement pour comprendre.
+1) Utilise un acronyme UNIQUEMENT s’il est cohérent avec le texte "Analyse".
+2) Ignore un acronyme si :
+   - il n’a pas de définition,
+   - il figure dans la liste "BRUIT",
+   - il semble hors-sujet (initiales, faute de frappe).
+3) Ne base JAMAIS une classification uniquement sur un acronyme.
+4) Ne recopie JAMAIS les définitions dans la sortie.
 
 ACRONYMES DÉFINIS :
 {acronymes_json}
 
-CODES BRUIT / FAUTES PROBABLES / INITIALES DU MEDIATEURS :
+CODES BRUIT / FAUTES PROBABLES / INITIALES MÉDIATEURS :
 {bruit_json}
 
-PRIORITÉ DES SOURCES POUR CLASSIFIER :
+================================================
+PRIORITÉ DES SOURCES POUR CLASSIFIER
+================================================
+
 1) Texte "Analyse" (priorité maximale)
-2) Champs métier structurés (Catégorie / Domaine / Sous-domaine / Nature de la saisine)
-3) Acronymes (uniquement comme indices secondaires)
+2) Champs métier structurés (Catégorie, Domaine, Sous-domaine, Nature de la saisine)
+3) Acronymes (indices secondaires uniquement)
 
+================================================
+ENTRÉE — LISTE DES PLAINTES (JSON)
+================================================
 
-ENTRÉE : LISTE DES PLAINTES (JSON)
-Tu dois produire 1 objet de sortie par plainte, dans le même ordre exact.
+Tu dois produire EXACTEMENT un objet de sortie par plainte,
+dans le MÊME ORDRE que la liste d’entrée.
 
 PLAINTES :
 {plaintes_json}
 
-RÉPONSE : UNIQUEMENT un tableau JSON (même ordre), sans texte libre.
+================================================
+SORTIE ATTENDUE
+================================================
+
+RÉPONSE : UNIQUEMENT un tableau JSON,
+sans texte libre, sans commentaire, sans métadonnées.
 """.strip()
+
 
 # ---------- APPEL GEMINI ----------
 def enrich_batch(client: genai.Client, batch: List[dict]) -> List[dict]:
@@ -268,7 +381,20 @@ def enrich_batch(client: genai.Client, batch: List[dict]) -> List[dict]:
                 ),
             )
 
-            parsed_list: List[EnrichissementMinimal] = response.parsed
+            parsed_list = response.parsed
+
+            # 🔒 GARDE-FOU CRITIQUE (cause de ton erreur NoneType)
+            if parsed_list is None:
+                raise ValueError(
+                    "Réponse Gemini invalide : response.parsed est None "
+                    "(JSON vide, tronqué ou non conforme)"
+                )
+
+            if not isinstance(parsed_list, list):
+                raise ValueError(
+                    f"Réponse Gemini invalide : type inattendu {type(parsed_list)}"
+                )
+
             if len(parsed_list) != len(batch):
                 raise ValueError(
                     f"Nombre d'objets retournés ({len(parsed_list)}) "
@@ -278,18 +404,36 @@ def enrich_batch(client: genai.Client, batch: List[dict]) -> List[dict]:
             final_batch: List[dict] = []
             for plainte_brute, enrichie in zip(batch, parsed_list):
                 enriched_dict = enrichie.model_dump()
-
-                # Merge minimal : on garde l'objet initial tel quel + 4 champs
                 final_obj = {**plainte_brute, **enriched_dict}
-
-                # Sécurité : on s'assure qu'on n'a pas accidentellement injecté des champs interdits
-                # (ici, enrichie ne peut contenir que les 4 clés, grâce au schema)
                 final_batch.append(final_obj)
 
             return final_batch
 
         except Exception as e:
             msg = str(e)
+
+            # ---- 429 : quota / rate limit ----
+            if "429" in msg or "RESOURCE_EXHAUSTED" in msg:
+                delay = 60
+                try:
+                    m1 = re.search(r"Please retry in\s+(\d+)(?:\.\d+)?s", msg)
+                    m2 = re.search(r"retryDelay'\s*:\s*'(\d+)s'", msg)
+                    m3 = re.search(r'"retryDelay"\s*:\s*"(\d+)s"', msg)
+
+                    if m1:
+                        delay = int(m1.group(1)) + 2
+                    elif m2:
+                        delay = int(m2.group(1)) + 2
+                    elif m3:
+                        delay = int(m3.group(1)) + 2
+                except Exception:
+                    pass
+
+                print(f"[AVERTISSEMENT] 429 RESOURCE_EXHAUSTED. Pause {delay}s puis retry...")
+                time.sleep(delay)
+                continue
+
+            # ---- 503 : service unavailable ----
             if "503" in msg or "UNAVAILABLE" in msg:
                 if attempt < MAX_RETRIES:
                     delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
@@ -299,10 +443,15 @@ def enrich_batch(client: genai.Client, batch: List[dict]) -> List[dict]:
                     )
                     time.sleep(delay)
                     continue
+
                 print("[ERREUR] 503 UNAVAILABLE après plusieurs tentatives. Arrêt du traitement.")
                 raise
+
+            # ---- Autres erreurs : stop ----
             print(f"[ERREUR] Échec enrichissement batch : {e}")
             raise
+
+
 
 # ---------- VÉRIFICATION AVANCEMENT (optionnel) ----------
 def check_avancement():
